@@ -12,13 +12,15 @@ Crash-safe сохранение во время работы:
 - results/<ts>/checkpoint.jsonl (append, 1 строка = 1 результат)
 - results/<ts>/*.csv по категориям (append)
 
-Проблема "долгой паузы" после 100% прогресса обычно связана с финализацией:
-- пересборка Excel (pandas/openpyxl) может быть очень долгой на больших файлах,
-- закрытие файлов и финальное flush/fsync,
-- финальное создание summary.
+Про Excel:
+- Создание Excel (pandas/openpyxl) может занимать очень много времени на больших базах.
+- Поэтому добавлен флаг BUILD_EXCEL_FILES: по умолчанию False.
+  Основной быстрый результат — CSV/JSONL.
 
-В этой версии добавлен дружелюбный вывод с индикатором активности на этапе финализации,
-чтобы было понятно, что программа НЕ зависла.
+Про входной файл:
+- INPUT_FILE может быть .xlsx/.xls или .csv.
+- CSV/Excel могут быть с заголовком или без; заголовок может быть любым.
+- Программа автоматически находит столбец с email по содержимому (ищет значения, похожие на email).
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import json
 import logging
 import os
 import random
+import re
 import socket
 import smtplib
 import threading
@@ -51,22 +54,27 @@ from filters import EmailFilter
 # ======================
 # НАСТРОЙКИ
 # ======================
-INPUT_FILE = "emails+1.xlsx"
+# Вход: .xlsx/.xls или .csv
+INPUT_FILE = "техно.csv"
 
 OUTPUT_DIR = "results"  # results/<timestamp>/
 NUM_THREADS = 15
 
-DNS_TIMEOUT_SEC = 8
-SMTP_TIMEOUT_SEC = 20
+DNS_TIMEOUT_SEC = 5
+SMTP_TIMEOUT_SEC = 8
 MAX_MX_SERVERS = 3
 
 # Сохранять прогресс сразу (чтобы падение не теряло результат)
 FLUSH_EVERY_RESULT = True
-FSYNC_EVERY_N = 50            # fsync раз в N результатов (0 = отключить)
+FSYNC_EVERY_N = 50  # fsync раз в N результатов (0 = отключить)
 
-# Excel тяжёлый для постоянной дозаписи: делаем периодическую пересборку из CSV/JSONL
-REBUILD_XLSX_EVERY_N = 200    # 0 = не пересобирать в процессе, только в конце
-FINAL_BUILD_XLSX = True       # пересобрать xlsx в конце
+# === Excel output toggle ===
+# Если False: Excel НЕ создаётся (максимальная скорость, остаются CSV/JSONL).
+BUILD_EXCEL_FILES = False
+
+# Excel тяжёлый для постоянной дозаписи: делаем периодическую пересборку из CSV
+REBUILD_XLSX_EVERY_N = 200  # 0 = не пересобирать в процессе
+FINAL_BUILD_XLSX = True     # пересобрать xlsx в конце
 
 # Небольшой jitter между SMTP-подключениями (уменьшает риск блокировок)
 JITTER_SEC_RANGE = (0.0, 0.25)
@@ -90,6 +98,10 @@ FILTER_CONFIG_PATH = "filters_config.json"
 
 # Дружелюбный индикатор финализации
 FINALIZATION_HEARTBEAT_SEC = 1.0
+
+# Поиск email в файле
+EMAIL_LIKE_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+DETECT_ROWS = 200  # сколько первых строк анализировать для определения столбца email
 
 
 # ======================
@@ -174,14 +186,12 @@ class Heartbeat:
     def stop(self):
         self._stop.set()
         self._t.join(timeout=2)
-        # перенос строки после \r
         print()
 
     def _run(self):
         while not self._stop.is_set():
             frame = self._frames[self._idx % len(self._frames)]
             self._idx += 1
-            # \r чтобы обновлять строку
             print(c(f"{self.title} {frame}", Fore.CYAN), end="\r", flush=True)
             time.sleep(self.interval_sec)
 
@@ -283,22 +293,121 @@ def smtp_probe(mx_host: str, priority: int, rcpt_email: str) -> SMTPCheck:
     return res
 
 
-def read_emails_from_excel(path: str) -> List[str]:
-    df = pd.read_excel(path)
-    cols = [c for c in df.columns if "email" in str(c).lower()]
-    if not cols:
-        raise ValueError("Не найден столбец, содержащий 'email' в названии")
+def _email_like(s: str) -> bool:
+    if not s:
+        return False
+    return bool(EMAIL_LIKE_REGEX.search(str(s)))
 
-    emails = df[cols[0]].dropna().astype(str).map(lambda x: x.strip()).tolist()
-    emails = [e for e in emails if e]
 
+def _unique_keep_order(values: List[str]) -> List[str]:
     seen = set()
-    out = []
-    for e in emails:
-        if e not in seen:
-            out.append(e)
-            seen.add(e)
+    out: List[str] = []
+    for v in values:
+        if v not in seen:
+            out.append(v)
+            seen.add(v)
     return out
+
+
+def _detect_delimiter(sample: str) -> str:
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"])
+        return dialect.delimiter
+    except Exception:
+        return ";" if sample.count(";") > sample.count(",") else ","
+
+
+def read_emails_from_file(path: str) -> List[str]:
+    """Читает .xlsx/.xls или .csv и возвращает список email.
+
+    Логика:
+    - Заголовок может быть любым или отсутствовать.
+    - Определяем столбец с email по содержимому (ищем наиболее 'email-похожую' колонку).
+    - Если файл много-колоночный и email встречается в нескольких колонках — берём лучшую колонку.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(path)
+
+    ext = p.suffix.lower()
+
+    if ext in (".xlsx", ".xls"):
+        df = pd.read_excel(path, header=None, dtype=str)
+        if df.shape[1] == 0:
+            return []
+
+        sample = df.head(DETECT_ROWS)
+        best_col = None
+        best_score = -1
+        for col in df.columns:
+            score = int(sample[col].astype(str).map(_email_like).sum())
+            if score > best_score:
+                best_score = score
+                best_col = col
+
+        if best_col is None or best_score <= 0:
+            emails: List[str] = []
+            for col in df.columns:
+                emails.extend([x.strip() for x in df[col].dropna().astype(str).tolist() if _email_like(x)])
+            return _unique_keep_order([e.lower() for e in emails])
+
+        col_vals = df[best_col].dropna().astype(str).map(lambda x: x.strip()).tolist()
+        emails = [x for x in col_vals if _email_like(x)]
+        return _unique_keep_order([e.lower() for e in emails])
+
+    if ext == ".csv":
+        with p.open("r", encoding="utf-8", errors="ignore", newline="") as f:
+            sample_text = f.read(4096)
+            f.seek(0)
+            delimiter = _detect_delimiter(sample_text)
+
+            reader = csv.reader(f, delimiter=delimiter)
+
+            preview_rows: List[List[str]] = []
+            for _ in range(DETECT_ROWS):
+                try:
+                    preview_rows.append(next(reader))
+                except StopIteration:
+                    break
+
+            if not preview_rows:
+                return []
+
+            max_cols = max(len(r) for r in preview_rows)
+            scores = [0] * max_cols
+            for r in preview_rows:
+                for i in range(max_cols):
+                    val = r[i] if i < len(r) else ""
+                    if _email_like(val):
+                        scores[i] += 1
+
+            best_col = int(max(range(max_cols), key=lambda i: scores[i]))
+            best_score = scores[best_col]
+
+            emails: List[str] = []
+
+            def consume_row(row: List[str]):
+                nonlocal emails
+                if best_score > 0:
+                    if best_col < len(row):
+                        v = (row[best_col] or "").strip()
+                        if _email_like(v):
+                            emails.append(v.lower())
+                else:
+                    for v in row:
+                        v = (v or "").strip()
+                        if _email_like(v):
+                            emails.append(v.lower())
+
+            for r in preview_rows:
+                consume_row(r)
+
+            for r in reader:
+                consume_row(r)
+
+            return _unique_keep_order(emails)
+
+    raise ValueError(f"Неподдерживаемый формат файла: {ext} (нужен .xlsx/.xls или .csv)")
 
 
 # ======================
@@ -326,7 +435,7 @@ class ResultWriter:
         if not self.jsonl_path.exists():
             self.jsonl_path.write_text("", encoding="utf-8")
 
-        for k, p in self.csv_paths.items():
+        for p in self.csv_paths.values():
             if not p.exists():
                 with p.open("w", newline="", encoding="utf-8") as f:
                     csv.writer(f).writerow(["Email"])
@@ -411,12 +520,10 @@ def validate_one(email: str, email_filter: EmailFilter) -> EmailResult:
         errors=[],
     )
 
-    # jitter
     jmin, jmax = JITTER_SEC_RANGE
     if jmax > 0:
         time.sleep(random.uniform(jmin, jmax))
 
-    # 0) фильтр
     decision = email_filter.check(email)
     if decision.blocked:
         r.filtered = True
@@ -427,7 +534,6 @@ def validate_one(email: str, email_filter: EmailFilter) -> EmailResult:
         r.total_time_sec = round(time.time() - t0, 3)
         return r
 
-    # 1) формат
     ok, msg = validate_format(email)
     r.format_ok = ok
     if not ok:
@@ -437,7 +543,6 @@ def validate_one(email: str, email_filter: EmailFilter) -> EmailResult:
         r.total_time_sec = round(time.time() - t0, 3)
         return r
 
-    # 2) parse
     try:
         r.user, r.domain = parse_email(email)
     except Exception:
@@ -447,7 +552,6 @@ def validate_one(email: str, email_filter: EmailFilter) -> EmailResult:
         r.total_time_sec = round(time.time() - t0, 3)
         return r
 
-    # 3) MX
     mx = get_mx(r.domain)
     if not mx:
         r.mx_ok = False
@@ -460,7 +564,6 @@ def validate_one(email: str, email_filter: EmailFilter) -> EmailResult:
     r.mx_ok = True
     r.mx_records = mx
 
-    # 4) SMTP
     mx_to_check = mx[: max(1, min(MAX_MX_SERVERS, len(mx)))]
 
     def run_checks_once() -> List[SMTPCheck]:
@@ -508,19 +611,14 @@ def validate_one(email: str, email_filter: EmailFilter) -> EmailResult:
 # ======================
 
 def write_summary(run_dir: Path, ts: str, total: int) -> None:
-    """Сводка на базе CSV, чтобы не держать всё в памяти."""
     def count_rows(csv_path: Path) -> int:
         if not csv_path.exists():
             return 0
-        try:
-            df = pd.read_csv(csv_path)
-            return int(len(df))
-        except Exception:
-            n = 0
-            with csv_path.open("r", encoding="utf-8", errors="ignore") as f:
-                for i, _ in enumerate(f):
-                    n = i
-            return max(0, n)
+        n = 0
+        with csv_path.open("r", encoding="utf-8", errors="ignore") as f:
+            for i, _ in enumerate(f):
+                n = i
+        return max(0, n)
 
     valid_n = count_rows(run_dir / "valid.csv")
     invalid_n = count_rows(run_dir / "invalid.csv")
@@ -532,7 +630,12 @@ def write_summary(run_dir: Path, ts: str, total: int) -> None:
     with summary_path.open("w", encoding="utf-8") as f:
         f.write("Email validation summary\n")
         f.write(f"Timestamp: {ts}\n")
-        f.write(f"Total in input: {total}\n\n")
+        f.write(f"Input file: {INPUT_FILE}\n")
+        f.write(f"Total in input (unique detected): {total}\n")
+        f.write(f"Threads: {NUM_THREADS}\n")
+        f.write(f"SMTP timeout: {SMTP_TIMEOUT_SEC}s\n")
+        f.write(f"Build Excel: {BUILD_EXCEL_FILES}\n")
+        f.write("\n")
         f.write(f"Valid: {valid_n}\n")
         f.write(f"Invalid: {invalid_n}\n")
         f.write(f"Temporary: {temp_n}\n")
@@ -545,18 +648,29 @@ def write_summary(run_dir: Path, ts: str, total: int) -> None:
 # ======================
 
 def main() -> None:
+    global REBUILD_XLSX_EVERY_N, FINAL_BUILD_XLSX
+
     if USE_COLORS:
         init(autoreset=True)
     load_dotenv()
+
+    if not BUILD_EXCEL_FILES:
+        REBUILD_XLSX_EVERY_N = 0
+        FINAL_BUILD_XLSX = False
 
     if not os.path.exists(INPUT_FILE):
         print(c(f"Файл не найден: {INPUT_FILE}", Fore.RED))
         return
 
-    emails = read_emails_from_excel(INPUT_FILE)
+    try:
+        emails = read_emails_from_file(INPUT_FILE)
+    except Exception as e:
+        print(c(f"Не удалось прочитать входной файл: {e}", Fore.RED))
+        return
+
     total = len(emails)
     if total == 0:
-        print(c("В файле нет email адресов", Fore.RED))
+        print(c("Не найдено email адресов во входном файле", Fore.RED))
         return
 
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -566,7 +680,10 @@ def main() -> None:
     email_filter = EmailFilter(FILTER_CONFIG_PATH)
     writer = ResultWriter(run_dir)
 
-    print(c(f"Проверка: {total} email | потоков={NUM_THREADS} | SMTP timeout={SMTP_TIMEOUT_SEC}s", Fore.MAGENTA))
+    print(c(f"Входной файл: {INPUT_FILE}", Fore.BLUE))
+    print(c(f"Найдено email (уникальных): {total}", Fore.BLUE))
+    print(c(f"Проверка: потоков={NUM_THREADS} | SMTP timeout={SMTP_TIMEOUT_SEC}s", Fore.MAGENTA))
+    print(c(f"Excel отчёты: {BUILD_EXCEL_FILES}", Fore.MAGENTA))
     print(c(f"Результаты пишутся сразу (checkpoint.jsonl + CSV) в: {run_dir}", Fore.GREEN))
 
     start = time.time()
@@ -613,7 +730,7 @@ def main() -> None:
                     remaining = avg * (total - done)
                     print(c(f"{done}/{total} ({done*100/total:.1f}%), осталось ~{timedelta(seconds=int(remaining))}", Fore.BLUE))
 
-                if REBUILD_XLSX_EVERY_N and done % REBUILD_XLSX_EVERY_N == 0:
+                if BUILD_EXCEL_FILES and REBUILD_XLSX_EVERY_N and done % REBUILD_XLSX_EVERY_N == 0:
                     print(c("Финализация (промежуточно): пересборка Excel из CSV...", Fore.CYAN))
                     hb = Heartbeat("Идёт пересборка Excel", FINALIZATION_HEARTBEAT_SEC)
                     hb.start()
@@ -625,7 +742,6 @@ def main() -> None:
 
     finally:
         print(c("\n100% проверок завершено. Начинаю финализацию результатов...", Fore.MAGENTA))
-        print(c("Это может занять время на больших базах (особенно создание Excel).", Fore.MAGENTA))
 
         if FINAL_BUILD_XLSX:
             print(c("Шаг 1/3: Финальная пересборка Excel файлов из CSV.", Fore.CYAN))
@@ -639,7 +755,7 @@ def main() -> None:
                 hb.stop()
             print(c("Шаг 1/3 завершён.", Fore.GREEN))
         else:
-            print(c("Шаг 1/3: Пропущено (FINAL_BUILD_XLSX=False).", Fore.YELLOW))
+            print(c("Шаг 1/3: Пропущено (Excel отключён).", Fore.YELLOW))
 
         print(c("Шаг 2/3: Создаю summary файл...", Fore.CYAN))
         hb = Heartbeat("Запись summary", FINALIZATION_HEARTBEAT_SEC)
@@ -665,7 +781,6 @@ def main() -> None:
     print(c(f"\nГотово за {timedelta(seconds=int(elapsed_total))}", Fore.MAGENTA))
     print(c(f"Папка результатов: {run_dir}", Fore.GREEN))
     print(c("Если программа упадёт — частичные результаты всё равно останутся в checkpoint.jsonl и CSV.", Fore.GREEN))
-    print(c("Подсказка: если Excel делается слишком долго — поставьте FINAL_BUILD_XLSX=False.", Fore.BLUE))
 
 
 if __name__ == "__main__":
