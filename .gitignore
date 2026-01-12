@@ -63,6 +63,7 @@ results/
 # Input files (обычно с персональными данными)
 emails+1.xlsx
 *.xlsx
+*.csv
 
 # Env files
 .env
