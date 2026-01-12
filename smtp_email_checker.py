@@ -35,6 +35,7 @@ import socket
 import smtplib
 import threading
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
@@ -55,7 +56,8 @@ from filters import EmailFilter
 # НАСТРОЙКИ
 # ======================
 # Вход: .xlsx/.xls или .csv
-INPUT_FILE = "техно.csv"
+# INPUT_FILE = "техно.csv"
+INPUT_FILE = str(Path(r"C:\Users\user\Downloads\111.csv"))
 
 OUTPUT_DIR = "results"  # results/<timestamp>/
 NUM_THREADS = 15
