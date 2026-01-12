@@ -1,0 +1,115 @@
+{
+  "enabled": true,
+
+  "block_local_exact": [
+    "no-reply",
+    "noreply",
+    "do-not-reply",
+    "donotreply",
+    "mailer-daemon",
+    "maildaemon",
+    "daemon",
+    "bounce",
+    "bounces",
+    "postmaster",
+    "abuse",
+    "spam",
+    "phish",
+    "phishing",
+    "security",
+    "privacy",
+    "compliance",
+    "devnull",
+    "null",
+    "root",
+    "webmaster",
+    "www",
+    "dns",
+    "ftp",
+    "hostmaster",
+    "inoc",
+    "noc",
+    "registrar",
+    "sysadmin",
+    "undisclosed-recipients",
+    "unsubscribe",
+    "list",
+    "list-request",
+    "ispfeedback",
+    "ispsupport",
+    "usenet",
+    "uucp"
+  ],
+
+  "block_local_contains": [
+    "no_reply",
+    "noreply",
+    "do_not_reply",
+    "donotreply",
+    "mailer-daemon",
+    "bounce"
+  ],
+
+  "block_local_regex": [
+    "^no[-_.]?reply$",
+    "^do[-_.]?not[-_.]?reply$",
+    "^mailer[-_.]?daemon$",
+    "^bounce(s)?$"
+  ],
+
+  "block_domain_exact": [
+    "example.com",
+    "example.org",
+    "example.net"
+  ],
+
+  "block_domain_suffix": [
+    ".invalid",
+    ".local"
+  ],
+
+  "block_domain_regex": [],
+
+  "user_block_local_exact": [
+    "hr",
+    "admin",
+    "support",
+    "help",
+    "buh",
+    "feedback",
+    "dispatch",
+    "tel",
+    "phone",
+    "logistics",
+    "delivery",
+    "warehouse",
+    "password",
+    "authentication",
+    "session",
+    "login",
+    "logout",
+    "account",
+    "settings",
+    "subscription",
+    "user",
+    "guest",
+    "anonymous",
+    "test",
+    "testing",
+    "debug",
+    "dev",
+    "development",
+    "beta",
+    "alpha",
+    "release",
+    "build",
+    "compile",
+    "deploy",
+    "push",
+    "pull"
+  ],
+
+  "user_block_domain_exact": [],
+  "user_block_domain_suffix": [],
+  "user_block_domain_regex": []
+}
