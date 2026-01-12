@@ -18,7 +18,7 @@
 
 ## Установка
 
-Требования: Python 3.9+. [code_file:1]
+Требования: Python 3.9+.
 
 ```bash
 pip install -r requirements.txt
