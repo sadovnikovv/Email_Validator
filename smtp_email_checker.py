@@ -57,7 +57,7 @@ from filters import EmailFilter
 # ======================
 # Вход: .xlsx/.xls или .csv
 # INPUT_FILE = "техно.csv"
-INPUT_FILE = str(Path(r"C:\Users\user\Downloads\111.csv"))
+INPUT_FILE = str(Path(r"C:\Users\Server_ZVK\PycharmProjects\Email_Validator\технопарк.csv"))
 
 OUTPUT_DIR = "results"  # results/<timestamp>/
 NUM_THREADS = 15
@@ -92,8 +92,8 @@ PROGRESS_EVERY = 20
 VERBOSE_PER_EMAIL = False
 
 # SMTP идентификация
-HELO_HOSTNAME = "mailchecker.local"
-MAIL_FROM = "checker@mailchecker.local"
+HELO_HOSTNAME = "mailchecker.zehvk.ru"
+MAIL_FROM = "info@zehvk.ru"
 
 # Фильтры
 FILTER_CONFIG_PATH = "filters_config.json"
