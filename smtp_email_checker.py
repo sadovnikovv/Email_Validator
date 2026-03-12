@@ -57,7 +57,11 @@ from filters import EmailFilter
 # ======================
 # Вход: .xlsx/.xls или .csv
 # INPUT_FILE = "техно.csv"
+<<<<<<< Updated upstream
 INPUT_FILE = str(Path(r"C:\Users\Server_ZVK\PycharmProjects\Email_Validator\технопарк.csv"))
+=======
+INPUT_FILE = str(Path(r"C:\Users\user\Downloads\Книга1.xlsx"))
+>>>>>>> Stashed changes
 
 OUTPUT_DIR = "results"  # results/<timestamp>/
 NUM_THREADS = 15
