@@ -73,7 +73,7 @@ from filters import EmailFilter
 
 # Вход: .xlsx/.xls или .csv
 # INPUT_FILE = "техно.csv"
-INPUT_FILE = str(Path(r"C:\Users\user\Downloads\MailPoet_export_5g3uji68g28s8o02.csv"))
+INPUT_FILE = str(Path(r"C:\Users\user\Downloads\ххх.csv"))
 
 OUTPUT_DIR = "results"
 NUM_THREADS = 15
