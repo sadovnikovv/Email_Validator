@@ -56,7 +56,6 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import functools
 import dns.exception
 import dns.resolver
 import pandas as pd
@@ -73,14 +72,14 @@ from filters import EmailFilter
 
 # Вход: .xlsx/.xls или .csv
 # INPUT_FILE = "техно.csv"
-INPUT_FILE = str(Path(r"C:\Users\user\Downloads\MailPoet_export_5g3uji68g28s8o02.csv"))
+INPUT_FILE = str(Path(r"C:\Users\user\Downloads\MailPoet_export_5g3uji68g28s8o0.csv"))
 
 OUTPUT_DIR = "results"
 NUM_THREADS = 15
 
-DNS_TIMEOUT_SEC = 8
-SMTP_TIMEOUT_SEC = 5
-MAX_MX_SERVERS = 2
+DNS_TIMEOUT_SEC = 5
+SMTP_TIMEOUT_SEC = 8
+MAX_MX_SERVERS = 3
 
 # Сохранять прогресс сразу
 FLUSH_EVERY_RESULT = True
@@ -108,7 +107,14 @@ VERBOSE_PER_EMAIL = False
 HELO_HOSTNAME = "mailchecker.zehvk.ru"
 MAIL_FROM = "info@zehvk.ru"
 
+# ======================
+# ДОБАВЛЕНО: ВЫБОР SMTP-РЕЖИМА
+# ======================
 
+# Допустимые значения:
+# "mx_probe"
+# "submission_envelope"
+# "submission_send"
 # ======================
 # РАЗЛИЧИЯ МЕЖДУ РЕЖИМАМИ
 # ======================
@@ -169,16 +175,7 @@ MAIL_FROM = "info@zehvk.ru"
 # ─────────────────────────────────────────
 # submission_envelope → Проверяет, готов ли сервер ПРИНЯТЬ письмо (безопасно)
 # submission_send     → Фактически ОТПРАВЛЯЕТ письмо получателю (требует согласия)
-
-# ======================
-# ДОБАВЛЕНО: ВЫБОР SMTP-РЕЖИМА
-# ======================
-
-# Допустимые значения:
-# "mx_probe"
-# "submission_envelope"
-# "submission_send"
-SMTP_CHECK_MODE = "mx_probe"
+SMTP_CHECK_MODE = "submission_envelope"
 
 # Настройки REG.RU используются только в submission_envelope/submission_send
 SMTP_HOST = "mail.hosting.reg.ru"
@@ -349,7 +346,6 @@ def parse_email(email: str) -> Tuple[str, str]:
     return user, domain.lower().strip().rstrip(".")
 
 
-@functools.lru_cache(maxsize=4096)
 def get_mx(domain: str) -> Optional[List[MXRecord]]:
     try:
         resolver = dns.resolver.Resolver()
@@ -668,7 +664,7 @@ def smtp_submission_probe(rcpt_email: str) -> SMTPCheck:
                         f"{reset_code} {reset_msg_s}"
                     )
 
-                    res.status = "valid"
+                    res.status = "submission_accepted"
                     res.delivery_possible = True
                     res.reason = (
                         "REG.RU accepted SMTP envelope after authentication; "
@@ -703,7 +699,7 @@ def smtp_submission_probe(rcpt_email: str) -> SMTPCheck:
                         )
                         return res
 
-                    res.status = "valid"
+                    res.status = "submitted"
                     res.delivery_possible = True
                     res.reason = (
                         "REG.RU accepted real message for onward delivery; "
@@ -1188,11 +1184,10 @@ def validate_one(
         errors=[],
     )
 
-    if SMTP_CHECK_MODE == "mx_probe":
-        jmin, jmax = JITTER_SEC_RANGE
-        
-        if jmax > 0:
-                time.sleep(random.uniform(jmin, jmax))
+    jmin, jmax = JITTER_SEC_RANGE
+
+    if jmax > 0:
+        time.sleep(random.uniform(jmin, jmax))
 
     # 1. Фильтрация.
     decision = email_filter.check(email)
@@ -1239,37 +1234,31 @@ def validate_one(
         )
         return result
 
-    # 4. MX нужен только для mx_probe
-    if SMTP_CHECK_MODE == "mx_probe":
-        mx = get_mx(result.domain)
+    # 4. MX остаётся обязательной проверкой во всех режимах.
+    mx = get_mx(result.domain)
 
-        if not mx:
-            result.mx_ok = False
-            result.final_status = "invalid"
-            result.confidence = 0
-            result.errors.append(
-                "No MX records or domain does not exist"
-            )
-            result.total_time_sec = round(
-                time.time() - t0,
-                3,
-            )
-            return result
+    if not mx:
+        result.mx_ok = False
+        result.final_status = "invalid"
+        result.confidence = 0
+        result.errors.append(
+            "No MX records or domain does not exist"
+        )
+        result.total_time_sec = round(
+            time.time() - t0,
+            3,
+        )
+        return result
 
-        result.mx_ok = True
-        result.mx_records = mx
+    result.mx_ok = True
+    result.mx_records = mx
 
-        mx_to_check = mx[
-            :max(
-                1,
-                min(MAX_MX_SERVERS, len(mx)),
-            )
-        ]
-    else:
-        # Для submission_envelope / submission_send MX не нужен
-        result.mx_ok = True
-        result.mx_records = []
-        mx_to_check = []
+    mx_to_check = mx[
+        :max(
+            1,
+            min(MAX_MX_SERVERS, len(mx)),
+        )
+    ]
 
     def run_checks_once() -> List[SMTPCheck]:
         # Исходный режим: каждый MX-сервер проверяется напрямую.
